@@ -288,7 +288,7 @@ int main(int argc, char *argv[])
     ba2 = ba2 * ba2;
 
     // solar functions needed
-    pd.function = S_GEOM | S_ZENETR | S_SRSS | S_ETR;
+    pd.function = S_GEOM | S_ZENETR | S_SRSS | S_ETR | S_SSHA ;
 
     S_solpos(&pd);
 
@@ -339,6 +339,19 @@ int main(int argc, char *argv[])
     nrows = Rast_window_rows();
     ncols = Rast_window_cols();
 
+    elevin_fd = Rast_open_old(parm.elevin->answer, "");
+    if (elevin_fd < 0)
+        G_fatal_error(_("Unable to open raster map <%s>"), parm.elevin->answer);
+
+    elevinbuf = Rast_allocate_f_buf();
+
+    linkein_fd = Rast_open_old(parm.linkein->answer, "");
+    if (linkein_fd < 0)
+      G_fatal_error(_("Unable to open raster map <%s>"), parm.linkein->answer);
+
+    linkeinbuf = Rast_allocate_f_buf();
+
+
     for (row = 0; row < nrows; row++) {
 
         G_percent(row, nrows, 2);
@@ -357,111 +370,135 @@ int main(int argc, char *argv[])
             double A0, A1, A2, B0, B1, B2, Bc, Bci, Bcz, C0, C1, C2;
             double D0, D1, D2, Dc, Dci, Dcz, Fbi, Fbi_sr, Fbiss, Fdi, Fdi_sr, Fdiss;
             double Gc, Gi, Trb, Trd, clcd, ha, hclinke, p_p0, ray, slsd;
-
+            bool is_not_null = true;
 
             if (!Rast_is_f_null_value(elevinbuf + col))
               z = (float)elevinbuf[col];
             else
-              z = UNDEFZ;
+              is_not_null = false;
 
             if (!Rast_is_f_null_value(linkeinbuf + col))
               linke = (float)linkeinbuf[col];
             else
-              linke = UNDEFZ;
+              is_not_null = false;
 
+            if (is_not_null) {
+              /* get cell center easting */
+              east = window.west + (col + 0.5) * window.ew_res;
+              east_ll = east;
 
-            /* get cell center easting */
-            east = window.west + (col + 0.5) * window.ew_res;
-            east_ll = east;
-
-            if (do_reproj) {
+              if (do_reproj) {
                 north_ll = north;
                 if (GPJ_transform(&iproj, &oproj, &tproj, PJ_FWD, &east_ll,
                                   &north_ll, NULL) < 0)
-                    G_fatal_error(
+                  G_fatal_error(
                         _("Error in %s (projection of input coordinate pair)"),
                         "GPJ_transform()");
+              }
+
+              /* geocentric latitude */
+              north_gc = atan(ba2 * tan(DEG2RAD * north_ll));
+              north_gc_sin = sin(north_gc);
+              roundoff(&north_gc_sin);
+              north_gc_cos = cos(north_gc);
+              roundoff(&north_gc_cos);
+
+              set_solpos_longitude(&pd, east_ll);
+              pd.latitude = north_gc * RAD2DEG;
+              retval = S_solpos(&pd);
+              S_decode(retval, &pd);
+              G_debug(3, "solpos hour angle: %.5f", pd.hrang);
+
+              // Common variables
+              p_p0=exp(-z/8434.5);
+              hclinke=linke*p_p0;
+              ray=1/(6.6296+1.7513*p_p0-0.1202*pow(p_p0,2)+0.0065*pow(p_p0,3));
+              slsd=sin(pd.latitude*DEG2RAD)*sin(pd.declin*DEG2RAD);
+              clcd=cos(pd.latitude*DEG2RAD)*cos(pd.declin*DEG2RAD);
+
+              // Beam Parameters
+              Trb=exp(-0.8662*hclinke*ray);
+              Bcz=pd.etrn*Trb;
+              C0=L[0][0]+L[0][1]*hclinke+L[0][2]*pow(hclinke,2);
+              C1=L[1][0]+L[1][1]*hclinke+L[1][2]*pow(hclinke,2);
+              C2=L[2][0]+L[2][1]*hclinke+L[2][2]*pow(hclinke,2)+L[2][3]*pow(hclinke,3);
+              B0=C0+C1*slsd+C2*pow(slsd,2)+0.5*C2*pow(clcd,2);
+              B1=C1*clcd+2*C2*slsd*clcd;
+              B2=0.25*C2*pow(clcd,2);
+              Fbiss=B0*pd.ssha*PI/180+B1*sin(pd.ssha*DEG2RAD)+B2*sin(2*pd.ssha*DEG2RAD);
+              Bc=2*Fbiss*Bcz*(12/PI);
+
+              // Diffuse Parameters
+              Trd=-1.5834e-2+3.03543e-2*hclinke+3.797e-4*pow(hclinke,2);
+              Dcz=pd.etrn*Trd;
+              A0=AP[0][0]+AP[0][1]*hclinke+AP[0][2]*pow(hclinke,2);
+              A1=AP[1][0]+AP[1][1]*hclinke+AP[1][2]*pow(hclinke,2);
+              A2=AP[2][0]+AP[2][1]*hclinke+AP[2][2]*pow(hclinke,2);
+              D0=A0+A1*slsd+A2*pow(slsd,2)+0.5*A2*pow(clcd,2);
+              D1=A1*clcd+2*A2*slsd*clcd;
+              D2=0.25*A2*pow(clcd,2);
+              Fdiss=D0*pd.ssha*PI/180+D1*sin(pd.ssha*DEG2RAD)+D2*sin(2*pd.ssha*DEG2RAD);
+              Dc=2*Fdiss*Dcz*(12/PI);
+
+              // Hour angle - max and min = sunrise and sunset
+              //ha=fmin(pd.ssha,fmax(-pd.ssha,pd.hrang));
+              ha=pd.hrang;
+
+              //              if (pd.tst < pd.sretr || pd.tst > pd.ssetr)
+              //  G_warning(_("Solar time is outside of sunrise/sunset time"));
+
+              if (pd.tst < pd.sretr) {
+                Bci=0;
+                Dci=0;
+              } else if (pd.tst > pd.ssetr) {
+                Bci=Bc;
+                Dci=Dc;
+              } else {
+                // Integrated Beam Parameters
+                Fbi=B0*ha*PI/180+B1*sin(ha*DEG2RAD)+B2*sin(2*ha*DEG2RAD);
+                Bci=(12/PI)*(Fbi + Fbiss)*Bcz;
+
+                // Integrated Diffuse Parameters
+                Fdi=D0*ha*PI/180+D1*sin(ha*DEG2RAD)+D2*sin(2*ha*DEG2RAD);
+                Dci=(12/PI)*(Fdi + Fdiss)*Dcz;
+              }
+              // Sum them up
+              Gc=Bc+Dc;
+              Gi=Bci+Dci;
             }
 
-            /* geocentric latitude */
-            north_gc = atan(ba2 * tan(DEG2RAD * north_ll));
-            north_gc_sin = sin(north_gc);
-            roundoff(&north_gc_sin);
-            north_gc_cos = cos(north_gc);
-            roundoff(&north_gc_cos);
-
-            set_solpos_longitude(&pd, east_ll);
-            pd.latitude = north_gc * RAD2DEG;
-            retval = S_solpos(&pd);
-            S_decode(retval, &pd);
-            G_debug(3, "solpos hour angle: %.5f", pd.hrang);
-
-            // Common variables
-            p_p0=exp(-z/8434.5);
-            hclinke=linke*p_p0;
-            ray=1/(6.6296+1.7513*p_p0-0.1202*pow(p_p0,2)+0.0065*pow(p_p0,3));
-            slsd=sin(pd.latitude)*sin(pd.declin);
-            clcd=cos(pd.latitude)*cos(pd.declin);
-
-            // Beam Parameters
-            Trb=exp(-0.8662*hclinke*ray);
-            Bcz=pd.etrn*Trb;
-            C0=L[0][0]+L[0][1]*hclinke+L[0][2]*pow(hclinke,2);
-            C1=L[1][0]+L[1][1]*hclinke+L[1][2]*pow(hclinke,2);
-            C2=L[2][0]+L[2][1]*hclinke+L[2][2]*pow(hclinke,2)+L[2][3]*pow(hclinke,3);
-            B0=C0+C1*slsd+C2*pow(slsd,2)+0.5*C2*pow(clcd,2);
-            B1=C1*clcd+2*C2*slsd*clcd;
-            B2=0.25*C2*pow(clcd,2);
-            Fbiss=B0*pd.ssha*PI/180+B1*sin(pd.ssha)+B2*sin(2*pd.ssha);
-            Bc=2*Fbiss*Bcz*(12/PI);
-
-            // Hour angle - max and min = sunrise and sunset
-            ha=fmin(pd.ssha,fmax(-pd.ssha,pd.hrang));
-
-            // Integrated Beam Parameters
-            Fbi_sr=B0*-pd.ssha*PI/180+B1*sin(-pd.ssha)+B2*sin(2*-pd.ssha);
-            Fbi=B0*ha*PI/180+B1*sin(ha)+B2*sin(2*ha);
-            Bci=(12/PI)*(Fbi-Fbi_sr)*Bcz;
-
-            // Diffuse Parameters
-            Trd=-1.5834e-2+3.03543e-2*hclinke+3.797e-4*pow(hclinke,2);
-            Dcz=pd.etrn*Trd;
-            A0=AP[0][0]+AP[0][1]*hclinke+AP[0][2]*pow(hclinke,2);
-            A1=AP[1][0]+AP[1][1]*hclinke+AP[1][2]*pow(hclinke,2);
-            A2=AP[2][0]+AP[2][1]*hclinke+AP[2][2]*pow(hclinke,2);
-            D0=A0+A1*slsd+A2*pow(slsd,2)+0.5*A2*pow(clcd,2);
-            D1=A1*clcd+2*A2*slsd*clcd;
-            D2=0.25*A2*pow(clcd,2);
-            Fdiss=D0*pd.ssha*PI/180+D1*sin(pd.ssha)+D2*sin(2*pd.ssha);
-            Dc=2*Fdiss*Dcz*(12/PI);
-
-            // Integrated Diffuse Parameters
-            Fdi_sr=D0*-pd.ssha*PI/180+D1*sin(-pd.ssha)+D2*sin(2*-pd.ssha);
-            Fdi=D0*ha*PI/180+D1*sin(ha)+D2*sin(2*ha);
-            Dci=(12/PI)*(Fdi-Fdi_sr)*Dcz;
-
-            // Sum them up
-            Gc=Bc+Dc;
-            Gi=Bci+Dci;
-
             if (beam_name) {
+              if (is_not_null)
                 beambuf[col] = Bci;
+              else
+                Rast_set_f_null_value(beambuf+col, 1);
             }
 
             if (diffuse_name) {
-              diffusebuf[col] = Dci;
+              if (is_not_null)
+                diffusebuf[col] = Dci;
+              else
+                Rast_set_f_null_value(diffusebuf+col, 1);
             }
 
             if (total_name) {
-              totalbuf[col] = Gi;
+              if (is_not_null)
+                totalbuf[col] = Gi;
+              else
+                Rast_set_f_null_value(totalbuf+col, 1);
             }
 
             if (sunhour_name) {
-              sunhourbuf[col] = (pd.ssetr - pd.sretr) / 60.;
-              if (sunhourbuf[col] > 24.)
-                sunhourbuf[col] = 24.;
-              if (sunhourbuf[col] < 0.)
-                sunhourbuf[col] = 0.;
+              if (is_not_null) {
+                sunhourbuf[col] = (pd.ssetr - pd.sretr) / 60.;
+                if (sunhourbuf[col] > 24.)
+                  sunhourbuf[col] = 24.;
+                if (sunhourbuf[col] < 0.)
+                  sunhourbuf[col] = 0.;
+                // testtest sunhourbuf[col] = pd.ssha;
+              }
+              else
+                Rast_set_f_null_value(sunhourbuf+col, 1);
             }
         }
         if (beam_name)
