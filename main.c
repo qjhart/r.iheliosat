@@ -80,10 +80,10 @@ int main(int argc, char *argv[])
 {
     struct GModule *module;
     struct {
-      struct Option *elevin, *linkein, *beam, *diffuse, *total, *sunhours, *year, *month, *day, *hour, *minutes, *seconds, *timezone;
+      struct Option *elevin, *linkein, *beam, *diffuse, *total, *hrang, *year, *month, *day, *hour, *minutes, *seconds, *timezone;
     } parm;
     struct Cell_head window;
-    FCELL *elevinbuf, *linkeinbuf, *beambuf, *diffusebuf, *totalbuf, *sunhourbuf;
+    FCELL *elevinbuf, *linkeinbuf, *beambuf, *diffusebuf, *totalbuf, *hrangbuf;
     struct History hist;
 
     /* projection information of input map */
@@ -91,12 +91,12 @@ int main(int argc, char *argv[])
     struct pj_info iproj; /* input map proj parameters  */
     struct pj_info oproj; /* output map proj parameters  */
     struct pj_info tproj; /* transformation parameters  */
-    char *elevin_name, *linkein_name, *beam_name, *diffuse_name, *total_name, *sunhour_name;
-    int elevin_fd, linkein_fd, beam_fd, diffuse_fd, total_fd, sunhour_fd;
+    char *elevin_name, *linkein_name, *beam_name, *diffuse_name, *total_name, *hrang_name;
+    int elevin_fd, linkein_fd, beam_fd, diffuse_fd, total_fd, hrang_fd;
     double east, east_ll, north, north_ll;
-    double north_gc, north_gc_sin, north_gc_cos; /* geocentric latitude */
+    double north_gc; /* geocentric latitude */
     double ba2;
-    int year, month, day, hour, minutes, seconds, timezone;
+     int year, month, day, hour, minutes, seconds, timezone;
     int doy; /* day of year */
     int row, col, nrows, ncols;
     int do_reproj = 0;
@@ -149,10 +149,10 @@ int main(int argc, char *argv[])
     parm.total->label = _("Output raster map with integrated total radiation");
     parm.total->required = NO;
 
-    parm.sunhours = G_define_standard_option(G_OPT_R_OUTPUT);
-    parm.sunhours->key = "sunhour";
-    parm.sunhours->label = _("Output raster map with sunshine hours");
-    parm.sunhours->required = NO;
+    parm.hrang = G_define_standard_option(G_OPT_R_OUTPUT);
+    parm.hrang->key = "hrang";
+    parm.hrang->label = _("Output raster map with sun hour angle (degrees)");
+    parm.hrang->required = NO;
 
     parm.year = G_define_option();
     parm.year->key = "year";
@@ -186,7 +186,7 @@ int main(int argc, char *argv[])
     parm.hour->required = NO;
     parm.hour->description = _("Hour");
     parm.hour->options = "0-24";
-    parm.hour->answer = "12";
+    //parm.hour->answer = "-1";
     parm.hour->guisection = _("Time");
 
     parm.minutes = G_define_option();
@@ -225,8 +225,8 @@ int main(int argc, char *argv[])
     beam_name = parm.beam->answer;
     diffuse_name = parm.diffuse->answer;
     total_name = parm.total->answer;
-    sunhour_name = parm.sunhours->answer;
-    if (!beam_name && !diffuse_name && !total_name && !sunhour_name)
+    hrang_name = parm.hrang->answer;
+    if (!beam_name && !diffuse_name && !total_name && !hrang_name)
       G_fatal_error(_("No output requested, exiting."));
 
     year = atoi(parm.year->answer);
@@ -236,15 +236,27 @@ int main(int argc, char *argv[])
         month = -1;
 
     day = atoi(parm.day->answer);
-    hour = atoi(parm.hour->answer);
-    minutes = atoi(parm.minutes->answer);
-    seconds = atoi(parm.seconds->answer);
-    timezone = atoi(parm.timezone->answer);
 
-    /* init variables */
-    north_gc_cos = 0;
-    north_gc_sin = 1;
-
+    // Check for time
+    if (parm.hour->answer) {
+      hour = atoi(parm.hour->answer);
+      if (parm.minutes->answer)
+        minutes = atoi(parm.minutes->answer);
+      else
+        minutes = 0;
+      if (parm.seconds->answer)
+        seconds = atoi(parm.seconds->answer);
+      else
+        seconds = 0;
+      if (parm.timezone->answer)
+        timezone = atoi(parm.timezone->answer);
+      else
+        timezone = 0;
+    } else {
+      hour = -1;
+      if (parm.minutes->answer || parm.seconds->answer || parm.timezone->answer)
+        G_fatal_error(_("If you provide minutes, seconds or timezone, you must provide hour."));
+    }
     if ((G_projection() != PROJECTION_LL)) {
         if (window.proj == 0)
             G_fatal_error(_("Current projection is x,y (undefined)."));
@@ -280,17 +292,9 @@ int main(int argc, char *argv[])
     else
         doy = dom2doy2(year, month, day);
 
-    set_solpos_time(&pd, year, 1, doy, hour, minutes, seconds, timezone);
-    set_solpos_longitude(&pd, 0);
-    pd.latitude = 0;
-
+    /* earth eccentricity correction factor */
     ba2 = 6356752.3142 / 6378137.0;
     ba2 = ba2 * ba2;
-
-    // solar functions needed
-    pd.function = S_GEOM | S_ZENETR | S_SRSS | S_ETR | S_SSHA ;
-
-    S_solpos(&pd);
 
     if (beam_name) {
         if ((beam_fd = Rast_open_new(beam_name, FCELL_TYPE)) < 0)
@@ -325,15 +329,15 @@ int main(int argc, char *argv[])
       total_fd = -1;
     }
 
-    if (sunhour_name) {
-        if ((sunhour_fd = Rast_open_new(sunhour_name, FCELL_TYPE)) < 0)
-            G_fatal_error(_("Unable to create raster map <%s>"), sunhour_name);
+    if (hrang_name) {
+        if ((hrang_fd = Rast_open_new(hrang_name, FCELL_TYPE)) < 0)
+            G_fatal_error(_("Unable to create raster map <%s>"), hrang_name);
 
-        sunhourbuf = Rast_allocate_f_buf();
+        hrangbuf = Rast_allocate_f_buf();
     }
     else {
-        sunhourbuf = NULL;
-        sunhour_fd = -1;
+        hrangbuf = NULL;
+        hrang_fd = -1;
     }
 
     nrows = Rast_window_rows();
@@ -368,8 +372,8 @@ int main(int argc, char *argv[])
             double z, linke;
             // Heliosat variables
             double A0, A1, A2, B0, B1, B2, Bc, Bci, Bcz, C0, C1, C2;
-            double D0, D1, D2, Dc, Dci, Dcz, Fbi, Fbi_sr, Fbiss, Fdi, Fdi_sr, Fdiss;
-            double Gc, Gi, Trb, Trd, clcd, ha, hclinke, p_p0, ray, slsd;
+            double D0, D1, D2, Dc, Dci, Dcz, Fbi, Fbiss, Fdi, Fdiss;
+            double Trb, Trd, clcd, hclinke, p_p0, ray, slsd;
             bool is_not_null = true;
 
             if (!Rast_is_f_null_value(elevinbuf + col))
@@ -398,16 +402,20 @@ int main(int argc, char *argv[])
 
               /* geocentric latitude */
               north_gc = atan(ba2 * tan(DEG2RAD * north_ll));
-              north_gc_sin = sin(north_gc);
-              roundoff(&north_gc_sin);
-              north_gc_cos = cos(north_gc);
-              roundoff(&north_gc_cos);
-
               set_solpos_longitude(&pd, east_ll);
               pd.latitude = north_gc * RAD2DEG;
+
+              /* First run for solar noon */
+              set_solpos_time(&pd, year, 1, doy,
+                              (720 - east_ll * 4) / 60,
+                              (int)(720 - east_ll * 4) % 60, 0, 0);
+
+              // solar functions needed
+              pd.function = S_GEOM | S_ZENETR | S_SRSS | S_ETR | S_SSHA ;
+
               retval = S_solpos(&pd);
               S_decode(retval, &pd);
-              G_debug(3, "solpos hour angle: %.5f", pd.hrang);
+              // G_debug(3, "solpos hour angle: %.5f", pd.hrang);
 
               // Common variables
               p_p0=exp(-z/8434.5);
@@ -440,31 +448,38 @@ int main(int argc, char *argv[])
               Fdiss=D0*pd.ssha*PI/180+D1*sin(pd.ssha*DEG2RAD)+D2*sin(2*pd.ssha*DEG2RAD);
               Dc=2*Fdiss*Dcz*(12/PI);
 
-              // Hour angle - max and min = sunrise and sunset
-              //ha=fmin(pd.ssha,fmax(-pd.ssha,pd.hrang));
-              ha=pd.hrang;
-
-              //              if (pd.tst < pd.sretr || pd.tst > pd.ssetr)
-              //  G_warning(_("Solar time is outside of sunrise/sunset time"));
-
-              if (pd.tst < pd.sretr) {
-                Bci=0;
-                Dci=0;
-              } else if (pd.tst > pd.ssetr) {
+              if (hour == -1) {
+                // Just get the solar noon values
                 Bci=Bc;
                 Dci=Dc;
               } else {
-                // Integrated Beam Parameters
-                Fbi=B0*ha*PI/180+B1*sin(ha*DEG2RAD)+B2*sin(2*ha*DEG2RAD);
-                Bci=(12/PI)*(Fbi + Fbiss)*Bcz;
+                // Now, get time of interest
+                set_solpos_time(&pd, year, 1, doy, hour, minutes, seconds, timezone);
+                // solar functions needed
+                pd.function = S_GEOM | S_ETR ;
+                retval = S_solpos(&pd);
+                S_decode(retval, &pd);
 
-                // Integrated Diffuse Parameters
-                Fdi=D0*ha*PI/180+D1*sin(ha*DEG2RAD)+D2*sin(2*ha*DEG2RAD);
-                Dci=(12/PI)*(Fdi + Fdiss)*Dcz;
+                if (pd.etrn == 0 ) { // Night
+                  if ( pd.hrang < 0 ) { // Before sunrise
+                    Bci=0;
+                    Dci=0;
+                  } else { // After sunset
+                    Bci=Bc;
+                    Dci=Dc;
+                  }
+                } else {
+                  // Integrated Beam Parameters
+                  Fbi=B0*pd.hrang*PI/180+B1*sin(pd.hrang*DEG2RAD)+B2*sin(2*pd.hrang*DEG2RAD);
+                  Bci=(12/PI)*(Fbi + Fbiss)*Bcz;
+                  Bci=fmax(Bci,0);
+
+                  // Integrated Diffuse Parameters
+                  Fdi=D0*pd.hrang*PI/180+D1*sin(pd.hrang*DEG2RAD)+D2*sin(2*pd.hrang*DEG2RAD);
+                  Dci=(12/PI)*(Fdi + Fdiss)*Dcz;
+                  Dci=fmax(Dci,0);
+                }
               }
-              // Sum them up
-              Gc=Bc+Dc;
-              Gi=Bci+Dci;
             }
 
             if (beam_name) {
@@ -483,22 +498,17 @@ int main(int argc, char *argv[])
 
             if (total_name) {
               if (is_not_null)
-                totalbuf[col] = Gi;
+                totalbuf[col] = Bci + Dci;
               else
                 Rast_set_f_null_value(totalbuf+col, 1);
             }
 
-            if (sunhour_name) {
+            if (hrang_name) {
               if (is_not_null) {
-                sunhourbuf[col] = (pd.ssetr - pd.sretr) / 60.;
-                if (sunhourbuf[col] > 24.)
-                  sunhourbuf[col] = 24.;
-                if (sunhourbuf[col] < 0.)
-                  sunhourbuf[col] = 0.;
-                // testtest sunhourbuf[col] = pd.ssha;
+                hrangbuf[col] = pd.hrang;
               }
               else
-                Rast_set_f_null_value(sunhourbuf+col, 1);
+                Rast_set_f_null_value(hrangbuf+col, 1);
             }
         }
         if (beam_name)
@@ -507,10 +517,13 @@ int main(int argc, char *argv[])
           Rast_put_f_row(diffuse_fd, diffusebuf);
         if (total_name)
           Rast_put_f_row(total_fd, totalbuf);
-        if (sunhour_name)
-            Rast_put_f_row(sunhour_fd, sunhourbuf);
+        if (hrang_name)
+            Rast_put_f_row(hrang_fd, hrangbuf);
     }
     G_percent(1, 1, 2);
+
+    Rast_close(elevin_fd);
+    Rast_close(linkein_fd);
 
     if (beam_name) {
         Rast_close(beam_fd);
@@ -533,12 +546,12 @@ int main(int argc, char *argv[])
       Rast_command_history(&hist);
       Rast_write_history(total_name, &hist);
     }
-    if (sunhour_name) {
-        Rast_close(sunhour_fd);
+    if (hrang_name) {
+        Rast_close(hrang_fd);
         /* writing history file */
-        Rast_short_history(sunhour_name, "raster", &hist);
+        Rast_short_history(hrang_name, "raster", &hist);
         Rast_command_history(&hist);
-        Rast_write_history(sunhour_name, &hist);
+        Rast_write_history(hrang_name, &hist);
     }
 
     G_done_msg(" ");
@@ -565,7 +578,6 @@ void set_solpos_time(struct posdata *pdat, int year, int month, int day,
 void set_solpos_longitude(struct posdata *pdat, double longitude)
 {
     pdat->longitude = longitude;
-
     pdat->longitude_updated = 1;
 }
 
