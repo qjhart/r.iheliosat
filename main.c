@@ -80,10 +80,10 @@ int main(int argc, char *argv[])
 {
     struct GModule *module;
     struct {
-      struct Option *elevin, *linkein, *beam, *diffuse, *total, *hrang, *year, *month, *day, *hour, *minutes, *seconds, *timezone;
+      struct Option *elevin, *linkein, *beam, *diffuse, *total, *hrang, *sretr, *ssetr, *year, *month, *day, *hour, *minutes, *seconds, *timezone;
     } parm;
     struct Cell_head window;
-    FCELL *elevinbuf, *linkeinbuf, *beambuf, *diffusebuf, *totalbuf, *hrangbuf;
+    FCELL *elevinbuf, *linkeinbuf, *beambuf, *diffusebuf, *totalbuf, *sretrbuf, *ssetrbuf, *hrangbuf;
     struct History hist;
 
     /* projection information of input map */
@@ -91,8 +91,8 @@ int main(int argc, char *argv[])
     struct pj_info iproj; /* input map proj parameters  */
     struct pj_info oproj; /* output map proj parameters  */
     struct pj_info tproj; /* transformation parameters  */
-    char *elevin_name, *linkein_name, *beam_name, *diffuse_name, *total_name, *hrang_name;
-    int elevin_fd, linkein_fd, beam_fd, diffuse_fd, total_fd, hrang_fd;
+    char *elevin_name, *linkein_name, *beam_name, *diffuse_name, *total_name, *sretr_name, *ssetr_name, *hrang_name;
+    int elevin_fd, linkein_fd, beam_fd, diffuse_fd, total_fd, sretr_fd, ssetr_fd, hrang_fd;
     double east, east_ll, north, north_ll;
     double north_gc; /* geocentric latitude */
     double ba2;
@@ -148,6 +148,16 @@ int main(int argc, char *argv[])
     parm.total->key = "total";
     parm.total->label = _("Output raster map with integrated total radiation");
     parm.total->required = NO;
+
+    parm.sretr = G_define_standard_option(G_OPT_R_OUTPUT);
+    parm.sretr->key = "sretr";
+    parm.sretr->label = _("Output raster map with sun rise in minutes since midnight");
+    parm.sretr->required = NO;
+
+    parm.ssetr = G_define_standard_option(G_OPT_R_OUTPUT);
+    parm.ssetr->key = "ssetr";
+    parm.ssetr->label = _("Output raster map with sun set in minutes since midnight");
+    parm.ssetr->required = NO;
 
     parm.hrang = G_define_standard_option(G_OPT_R_OUTPUT);
     parm.hrang->key = "hrang";
@@ -225,8 +235,11 @@ int main(int argc, char *argv[])
     beam_name = parm.beam->answer;
     diffuse_name = parm.diffuse->answer;
     total_name = parm.total->answer;
+    sretr_name = parm.sretr->answer;
+    ssetr_name = parm.ssetr->answer;
     hrang_name = parm.hrang->answer;
-    if (!beam_name && !diffuse_name && !total_name && !hrang_name)
+    // G_debug(3, "beam: %s, diffuse: %s, total: %s, sretr: %s, ssetr: %s, hrang: %s", beam_name, diffuse_name, total_name, sretr_name, ssetr_name, hrang_name);
+    if (!beam_name && !diffuse_name && !total_name && !sretr_name && !ssetr_name && !hrang_name)
       G_fatal_error(_("No output requested, exiting."));
 
     year = atoi(parm.year->answer);
@@ -236,6 +249,11 @@ int main(int argc, char *argv[])
         month = -1;
 
     day = atoi(parm.day->answer);
+
+    if (parm.timezone->answer)
+      timezone = atoi(parm.timezone->answer);
+    else
+      timezone = 0;
 
     // Check for time
     if (parm.hour->answer) {
@@ -248,15 +266,15 @@ int main(int argc, char *argv[])
         seconds = atoi(parm.seconds->answer);
       else
         seconds = 0;
-      if (parm.timezone->answer)
-        timezone = atoi(parm.timezone->answer);
-      else
-        timezone = 0;
     } else {
       hour = -1;
-      if (parm.minutes->answer || parm.seconds->answer || parm.timezone->answer)
-        G_fatal_error(_("If you provide minutes, seconds or timezone, you must provide hour."));
+      G_debug(3, "hour: %d minutes: %d seconds: %d timezone: %d", hour, minutes, seconds, timezone);
+      //      if (parm.minutes->answer || parm.seconds->answer || parm.timezone->answer)
+      if (minutes || seconds )
+        G_fatal_error(_("If you provide minutes or seconds, you must provide hour."));
     }
+
+    //    G_fatal_error(_("Not implemented yet."));
     if ((G_projection() != PROJECTION_LL)) {
         if (window.proj == 0)
             G_fatal_error(_("Current projection is x,y (undefined)."));
@@ -291,6 +309,7 @@ int main(int argc, char *argv[])
         doy = day;
     else
         doy = dom2doy2(year, month, day);
+
 
     /* earth eccentricity correction factor */
     ba2 = 6356752.3142 / 6378137.0;
@@ -329,15 +348,37 @@ int main(int argc, char *argv[])
       total_fd = -1;
     }
 
-    if (hrang_name) {
-        if ((hrang_fd = Rast_open_new(hrang_name, FCELL_TYPE)) < 0)
-            G_fatal_error(_("Unable to create raster map <%s>"), hrang_name);
+    if (sretr_name) {
+        if ((sretr_fd = Rast_open_new(sretr_name, FCELL_TYPE)) < 0)
+            G_fatal_error(_("Unable to create raster map <%s>"), sretr_name);
 
-        hrangbuf = Rast_allocate_f_buf();
+        sretrbuf = Rast_allocate_f_buf();
     }
     else {
-        hrangbuf = NULL;
-        hrang_fd = -1;
+        sretrbuf = NULL;
+        sretr_fd = -1;
+    }
+
+    if (ssetr_name) {
+      if ((ssetr_fd = Rast_open_new(ssetr_name, FCELL_TYPE)) < 0)
+        G_fatal_error(_("Unable to create raster map <%s>"), ssetr_name);
+
+      ssetrbuf = Rast_allocate_f_buf();
+    }
+    else {
+      ssetrbuf = NULL;
+      ssetr_fd = -1;
+    }
+
+    if (hrang_name) {
+      if ((hrang_fd = Rast_open_new(hrang_name, FCELL_TYPE)) < 0)
+        G_fatal_error(_("Unable to create raster map <%s>"), hrang_name);
+
+      hrangbuf = Rast_allocate_f_buf();
+    }
+    else {
+      hrangbuf = NULL;
+      hrang_fd = -1;
     }
 
     nrows = Rast_window_rows();
@@ -407,8 +448,8 @@ int main(int argc, char *argv[])
 
               /* First run for solar noon */
               set_solpos_time(&pd, year, 1, doy,
-                              (720 - east_ll * 4) / 60,
-                              (int)(720 - east_ll * 4) % 60, 0, 0);
+                              ((720+timezone*60) - east_ll * 4) / 60,
+                              (int)((720+timezone*60) - east_ll * 4) % 60, 0, timezone);
 
               // solar functions needed
               pd.function = S_GEOM | S_ZENETR | S_SRSS | S_ETR | S_SSHA ;
@@ -503,6 +544,22 @@ int main(int argc, char *argv[])
                 Rast_set_f_null_value(totalbuf+col, 1);
             }
 
+            if (sretr_name) {
+              if (is_not_null) {
+                sretrbuf[col] = pd.sretr;
+              }
+              else
+                Rast_set_f_null_value(sretrbuf+col, 1);
+            }
+
+            if (ssetr_name) {
+              if (is_not_null) {
+                ssetrbuf[col] = pd.ssetr;
+              }
+              else
+                Rast_set_f_null_value(ssetrbuf+col, 1);
+            }
+
             if (hrang_name) {
               if (is_not_null) {
                 hrangbuf[col] = pd.hrang;
@@ -517,6 +574,10 @@ int main(int argc, char *argv[])
           Rast_put_f_row(diffuse_fd, diffusebuf);
         if (total_name)
           Rast_put_f_row(total_fd, totalbuf);
+        if (sretr_name)
+            Rast_put_f_row(sretr_fd, sretrbuf);
+        if (ssetr_name)
+            Rast_put_f_row(ssetr_fd, ssetrbuf);
         if (hrang_name)
             Rast_put_f_row(hrang_fd, hrangbuf);
     }
@@ -553,7 +614,20 @@ int main(int argc, char *argv[])
         Rast_command_history(&hist);
         Rast_write_history(hrang_name, &hist);
     }
-
+    if (sretr_name) {
+        Rast_close(sretr_fd);
+        /* writing history file */
+        Rast_short_history(sretr_name, "raster", &hist);
+        Rast_command_history(&hist);
+        Rast_write_history(sretr_name, &hist);
+    }
+    if (ssetr_name) {
+        Rast_close(ssetr_fd);
+        /* writing history file */
+        Rast_short_history(ssetr_name, "raster", &hist);
+        Rast_command_history(&hist);
+        Rast_write_history(ssetr_name, &hist);
+    }
     G_done_msg(" ");
 
     exit(EXIT_SUCCESS);
